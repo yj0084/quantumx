@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: quantumx-pro
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT --timeout 120
+    healthCheckPath: /api
+    autoDeploy: true
+    envVars:
+      # 한투(KIS) API 키 — 파일에 저장하지 않고 Render 대시보드에서 직접 입력한다.
+      # main.py는 APP_KEY / APP_SECRET 이름을 읽는다(Replit의 KIS_APP_KEY / KIS_APP_SECRET와 이름이 다름).
+      - key: APP_KEY
+        sync: false
+      - key: APP_SECRET
+        sync: false
+      # 모의투자 도메인(실전 전환 시 이 값만 변경)
+      - key: KIS_BASE_URL
+        value: https://openapivts.koreainvestment.com:29443

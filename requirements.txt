@@ -1,0 +1,7 @@
+# quantumx PRO — Render 무료 웹서비스 배포용 의존성
+# main.py의 import 중 실제 사용: os, sys, json, requests, pandas, flask
+# (matplotlib은 generate_report()에서만 쓰이는데 현재 호출되지 않아 제외 — 없어도 HAS_MPL=False로 정상 동작)
+flask>=3.0,<4
+pandas>=2.2,<3.2
+requests>=2.31
+gunicorn>=21.2

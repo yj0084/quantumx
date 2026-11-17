@@ -1,0 +1,20 @@
+# --- secrets ---
+kis_token.json
+.env
+.env.*
+*.pem
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pythonlib/
+.local/
+
+# --- generated files ---
+*_chart.png
+*.log
+
+# --- editor / OS ---
+.DS_Store
