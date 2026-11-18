@@ -1120,7 +1120,8 @@ _YAHOO_HTTP = {"session": None, "crumb": None, "at": None}
 
 
 def _yahoo_crumb(force=False):
-    """야후 quoteSummary는 쿠키+crumb가 필요하다. 10분 캐시."""
+    """야후 quoteSummary는 쿠키+crumb가 필요하다. 10분 캐시.
+    서버 IP에 따라 fc.yahoo.com이 쿠키를 안 주는 경우가 있어 다른 입구도 시도한다."""
     now = datetime.now()
     if (not force and _YAHOO_HTTP.get("crumb")
             and _YAHOO_HTTP.get("at") and (now - _YAHOO_HTTP["at"]).total_seconds() < 600):
@@ -1129,19 +1130,77 @@ def _yahoo_crumb(force=False):
         if _YAHOO_HTTP.get("session") is None:
             _YAHOO_HTTP["session"] = requests.Session()
         sess = _YAHOO_HTTP["session"]
-        try:
-            sess.get("https://fc.yahoo.com", headers={"User-Agent": UA}, timeout=4)
-        except Exception:
-            pass
-        res = sess.get("https://query1.finance.yahoo.com/v1/test/getcrumb",
-                       headers={"User-Agent": UA}, timeout=4)
-        crumb = (res.text or "").strip()
-        if res.status_code == 200 and crumb and "<" not in crumb:
-            _YAHOO_HTTP.update({"crumb": crumb, "at": now})
-            return crumb
+        headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                   "Accept-Language": "en-US,en;q=0.9"}
+        for warm in ("https://fc.yahoo.com", "https://finance.yahoo.com/",
+                     "https://finance.yahoo.com/quote/SPY"):
+            try:
+                sess.get(warm, headers=headers, timeout=4)
+            except Exception:
+                pass
+            if sess.cookies:
+                break
+        for host in ("query1", "query2"):
+            res = sess.get(f"https://{host}.finance.yahoo.com/v1/test/getcrumb",
+                           headers=headers, timeout=4)
+            crumb = (res.text or "").strip()
+            if res.status_code == 200 and crumb and "<" not in crumb:
+                _YAHOO_HTTP.update({"crumb": crumb, "at": now})
+                return crumb
     except Exception as e:
         print("⚠️ 야후 crumb 오류:", type(e).__name__)
     return None
+
+
+def _stockanalysis_consensus(ticker, price=None):
+    """야후가 서버 IP를 막을 때 쓰는 대체 소스: stockanalysis.com(S&P Global 애널리스트 집계) 문장 파싱."""
+    try:
+        res = requests.get(f"https://stockanalysis.com/stocks/{str(ticker).lower()}/forecast/",
+                           headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}, timeout=6)
+        if res.status_code != 200:
+            return None
+        flat = re.sub(r"\s+", " ", html_mod.unescape(re.sub(r"<[^>]+>", " ", res.text)))
+
+        def grab(pat):
+            m = re.search(pat, flat, re.I)
+            if not m:
+                return None
+            try:
+                return float(m.group(1).replace(",", ""))
+            except (TypeError, ValueError):
+                return None
+
+        mean = grab(r"average price target of \$([0-9,\.]+)")
+        if mean is None:
+            mean = grab(r"Price Target:\s*\$([0-9,\.]+)")
+        if mean is None:
+            return None
+        low = grab(r"lowest is \$([0-9,\.]+)")
+        high = grab(r"highest is \$([0-9,\.]+)")
+        n_analysts = grab(r"According to ([0-9,]+) analysts")
+        rating = None
+        m = re.search(r"consensus rating of [\"“”']?([A-Za-z][A-Za-z \-]{1,20}?)[\"“”']?\s+and an average", flat)
+        if m:
+            rating = m.group(1).strip()
+        consensus = {
+            "기준": "stockanalysis.com(S&P Global 애널리스트 집계)",
+            "애널리스트수": int(n_analysts) if n_analysts else None,
+            "평균_목표주가": round(mean, 2),
+            "중앙값_목표주가": None,
+            "최저_목표주가": (round(low, 2) if low else None),
+            "최고_목표주가": (round(high, 2) if high else None),
+            "현재가": round(price, 2) if price else None,
+            "평균_괴리율_pct": (round((mean / price - 1) * 100, 2) if price else None),
+            "투자의견": rating,
+            "투자의견_점수": None,
+            "투자의견_분포": None,
+            "분포_합계": None,
+        }
+        return {"지원": True, "상태": "ok", "통화": "USD", "출처": "stockanalysis.com",
+                "리포트": [], "컨센서스": consensus}
+    except Exception as e:
+        print("⚠️ stockanalysis 컨센서스 오류:", type(e).__name__)
+        return None
 
 
 def get_us_analyst_consensus(ticker, price=None):
@@ -1157,6 +1216,15 @@ def get_us_analyst_consensus(ticker, price=None):
         _RESEARCH_CACHE[key] = {"at": datetime.now(), "ttl": _RESEARCH_EMPTY_TTL, "data": data}
         return data
 
+    def _fallback(note):
+        """야후가 막히면 stockanalysis.com(S&P Global) 집계로 한 번 더 시도한다."""
+        alt = _stockanalysis_consensus(ticker, price)
+        if alt:
+            alt["비고"] = f"야후 조회 실패({note})로 대체 소스를 사용했습니다."
+            _RESEARCH_CACHE[key] = {"at": datetime.now(), "ttl": _RESEARCH_CACHE_TTL, "data": alt}
+            return alt
+        return _empty(note)
+
     def _fetch(crumb):
         sess = _YAHOO_HTTP.get("session") or requests
         return sess.get(f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}",
@@ -1166,16 +1234,16 @@ def get_us_analyst_consensus(ticker, price=None):
     try:
         crumb = _yahoo_crumb()
         if not crumb:
-            return _empty("야후 인증(crumb)을 받지 못해 컨센서스를 조회하지 못했습니다.")
+            return _fallback("야후 인증(crumb) 실패")
         res = _fetch(crumb)
         if res.status_code == 401:
             crumb = _yahoo_crumb(force=True)
             res = _fetch(crumb) if crumb else res
         if res.status_code != 200:
-            return _empty(f"야후 컨센서스 응답 오류(HTTP {res.status_code}).")
+            return _fallback(f"야후 HTTP {res.status_code}")
         result = ((res.json() or {}).get("quoteSummary") or {}).get("result") or []
         if not result:
-            return _empty("야후에 이 종목의 애널리스트 데이터가 없습니다.")
+            return _fallback("야후 애널리스트 데이터 없음")
         block = result[0] or {}
         fin = block.get("financialData") or {}
 
@@ -1220,7 +1288,7 @@ def get_us_analyst_consensus(ticker, price=None):
         return data
     except Exception as e:
         print("⚠️ 미국 컨센서스 조회 오류:", type(e).__name__)
-        return _empty("애널리스트 컨센서스를 불러오지 못했습니다.")
+        return _fallback("예외 발생")
 
 
 def rsi_zone(rsi):
