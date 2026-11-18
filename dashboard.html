@@ -451,6 +451,21 @@ function render(d,ms){
     '<div class="card"><h4>지지선 (아래)</h4>'+lvTable(sup,"현재가 아래에 지지 후보(이평선·VWAP·매물대·급증봉)가 없습니다.")+'</div>'+
     '<div class="card"><h4>저항선 (위)</h4>'+lvTable(res,"현재가 위에 저항 후보(이평선·VWAP·매물대·급증봉)가 없습니다.")+'</div>'+
     '</div>';
+  var ind=d["지표"]||{};
+  var vpPoc=ind["매물대_POC"], vp2=ind["매물대_2차"], vpDays=ind["매물대_조회일수"], vpBins=ind["매물대_구간수"],
+      spikes=ind["거래량_급증봉"]||[];
+  var lvInfo='';
+  if(vpPoc!=null||spikes.length){
+    var lrow=[];
+    if(vpPoc!=null) lrow.push(["최대 매물대 (POC)",price(vpPoc,cur)+
+      (ind["매물대_POC_비중_pct"]!=null?' <span class="mut">(거래량 비중 '+num(ind["매물대_POC_비중_pct"],1)+'%)</span>':'')]);
+    if(vp2!=null) lrow.push(["주요 매물대 (2차)",price(vp2,cur)]);
+    if(vpDays) lrow.push(["매물대 계산 범위",num(vpDays,0)+"거래일 · "+num(vpBins,0)+"구간"]);
+    if(spikes.length) lrow.push(["거래량 급증봉",spikes.map(function(s){
+      return esc(s["날짜"])+" "+price(s["가격"],cur)+' <span class="mut">('+num(s["배수"],2)+'배)</span>';
+    }).join(" · ")]);
+    lvInfo='<div class="card" style="margin-top:10px">'+kv(lrow)+'</div>';
+  }
 
   /* 증권사 리포트 / 컨센서스 */
   var RS=d["리서치"]||{}, reps=RS["리포트"]||[], cons=RS["컨센서스"]||null;
@@ -511,7 +526,7 @@ function render(d,ms){
   var rep=d["summary_report"]||"";
   var repFold=rep?'<details class="fold"><summary>전체 리포트 텍스트 보기</summary><div class="body"><pre id="rep">'+esc(rep)+'</pre></div></details>':'';
 
-  h+='<div class="stack">'+cards+lv+rsec+fold+repFold+
+  h+='<div class="stack">'+cards+lv+lvInfo+rsec+fold+repFold+
      '<div class="card" style="font-size:11.5px;color:#7f8da1">※ 과거 시세·수급 기반 기술적 계산이며 투자자문이 아닙니다. 조회 전용(주문·매매 기능 없음).</div>'+
      '</div>';
 
