@@ -7,9 +7,12 @@ except Exception:
     pass
 
 import json
+import re
+import html as html_mod
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, send_file
 
 # matplotlib은 차트 파일 생성에만 쓰인다. 없어도 API는 동작해야 하므로 선택적으로 불러온다.
@@ -359,11 +362,19 @@ def get_korea_stock_data(code, need=120):
 
         df = df.rename(columns={"localTradedAt": "date",
                                 "closePrice": "close",
-                                "accumulatedTradingVolume": "volume"})
+                                "accumulatedTradingVolume": "volume",
+                                "highPrice": "high",
+                                "lowPrice": "low"})
         df["close"] = df["close"].map(_num)
         df["volume"] = df["volume"].map(_num)
+        keep = ["date", "close", "volume"]
+        # 매물대(Volume Profile)는 봉별 고·저 범위가 있으면 더 정확하다. 없으면 종가로 대체.
+        for col in ("high", "low"):
+            if col in df.columns:
+                df[col] = df[col].map(_num)
+                keep.append(col)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df = df[["date", "close", "volume"]].dropna(subset=["date", "close"])
+        df = df[keep].dropna(subset=["date", "close"])
         df = df[df["close"] > 0]
         df = df.drop_duplicates(subset=["date"])
         if df.empty:
@@ -395,6 +406,8 @@ def get_us_stock_data(ticker):
         quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
         closes = quote.get("close") or []
         volumes = quote.get("volume") or []
+        highs = quote.get("high") or []
+        lows = quote.get("low") or []
 
         rows = []
         for i in range(min(len(stamps), len(closes))):
@@ -402,8 +415,12 @@ def get_us_stock_data(ticker):
             if close is None or close <= 0:
                 continue
             vol = _num(volumes[i]) if i < len(volumes) else None
+            high = _num(highs[i]) if i < len(highs) else None
+            low = _num(lows[i]) if i < len(lows) else None
             rows.append({"date": datetime.fromtimestamp(stamps[i]),
                          "close": close,
+                         "high": high if high else close,
+                         "low": low if low else close,
                          "volume": vol if vol is not None else 0.0})
         if not rows:
             raise RuntimeError("유효한 종가가 없습니다")
@@ -695,8 +712,24 @@ FORMULA_NOTES = {
     "종합점수": ("축별 0~100점의 가중평균. 매집 25% · 수급 25% · 모멘텀 20% · RSI 15% · 이평선 15%. "
              "수급을 못 받는 미국 종목은 남은 75% 가중치를 비례 재분배한다."),
     "등급컷": "종합점수 75 이상 STRONG_BUY / 62 이상 ADD / 45 이상 HOLD / 32 이상 REDUCE / 32 미만 SELL.",
-    "지지저항": ("지지선 = 현재가 아래에 있는 값들(MA5·MA20·MA60·VWAP20·최근 20일 종가 최저) 중 가까운 순, "
-             "저항선 = 현재가 위에 있는 값들(같은 목록 + 최근 20일 종가 최고) 중 가까운 순."),
+    "지지저항": ("지지선 = 현재가 아래에 있는 값들 중 가까운 순 최대 5개, 저항선 = 현재가 위에 있는 값들 중 "
+             "가까운 순 최대 5개. 후보는 ①이동평균(MA5·MA20·MA60) ②20일 VWAP ③최근 20·60일 종가 최저/최고 "
+             "④매물대(Volume Profile): 최근 최대 120거래일 가격 범위를 18개 구간으로 나눠 봉별 거래량을 "
+             "그 봉이 걸친 구간에 균등 배분해 누적한 뒤 최대 구간(POC, 최대 매물대)과 2순위 구간(주요 매물대)의 "
+             "중심가 ⑤거래량 급증봉: 직전 20일 평균 거래량의 2배 이상 터진 봉 중 최근 발생 순 최대 3개의 "
+             "고·저 중심가(고·저가 없으면 종가). 0.25% 이내로 겹치는 값은 매물대·급증봉 이름을 남기고 한 줄로 합친다."),
+    "매물대": ("Volume Profile. 최근 최대 120거래일 일봉의 가격 범위(고가 최대~저가 최소)를 18개 균등 구간으로 "
+             "나누고, 각 봉의 거래량을 그 봉의 고가~저가가 걸친 구간들에 똑같이 나눠 누적한다. 누적 거래량이 가장 큰 "
+             "구간의 중심가가 POC(최대 매물대), POC와 붙지 않은 구간 중 다음으로 큰 곳이 2차 매물대다. "
+             "매물대는 그 가격에서 많이 거래됐다는 뜻이라 지지·저항 후보로 쓰지만, 절대적인 벽은 아니다."),
+    "거래량급증봉": ("직전 20거래일 평균 거래량 대비 2.0배 이상 거래량이 발생한 봉을 최근 60거래일 안에서 최근 발생 순 "
+                 "최대 3개 찾고, 서로 1% 안에 붙은 봉은 하나만 남긴다. 기준가는 그 봉의 고·저 중심가(고·저가 없으면 종가). "
+                 "거래량이 급증한 자리는 매물이 쌓인 자리로 보고 지지·저항 후보에 넣는다."),
+    "증권사리포트": ("네이버 증권 리서치(모바일)의 종목별 최신 리포트 최대 5건. 증권사·작성일·제목·투자의견·목표주가와 "
+                "본문 앞 1~2문장 요약, PDF 원문 링크를 제공한다. 컨센서스의 평균·최저·최고 목표주가는 그 표본들의 단순 "
+                "평균·범위이며, 증권사 전체 컨센서스가 아니라 최근 리포트 표본 요약이다."),
+    "애널리스트컨센서스": ("미국 종목은 야후 파이낸스 애널리스트 데이터(목표주가 최저·평균·중앙·최고, 최근 1개월 투자의견 "
+                    "분포, 투자의견 평균점수, 애널리스트 수)를 쓴다. 데이터가 없거나 응답이 실패하면 미제공으로 표시한다."),
     "한계": ("모든 값은 과거 시세·수급의 기술적 계산이며 미래 예측이나 투자자문이 아니다. "
            "이 API는 조회·분석 전용으로 주문·매매 기능이 없다."),
 }
@@ -762,6 +795,432 @@ def calc_roc(closes, n):
     if not base:
         return None
     return round((closes[-1] / base - 1) * 100, 2)
+
+
+# ==========================
+# 📊 매물대(Volume Profile) · 거래량 급증봉
+# ==========================
+def _price_range_series(df):
+    """봉별 (저가, 고가). 일봉 고·저가가 없으면 종가로 대체한다."""
+    close = df["close"].astype(float)
+    low = df["low"].astype(float) if "low" in df.columns else close
+    high = df["high"].astype(float) if "high" in df.columns else close
+    low = low.where(low.notna() & (low > 0), close)
+    high = high.where(high.notna() & (high > 0), close)
+    return pd.concat([low, close], axis=1).min(axis=1), pd.concat([high, close], axis=1).max(axis=1)
+
+
+def calc_volume_profile(df, buckets=18, lookback=120):
+    """가격대별 매물대. 조회 이력의 가격 범위를 buckets개 구간으로 나눠 각 봉의 거래량을
+    그 봉이 걸친 구간들에 균등 배분해 누적하고, 최대 구간(POC)과 2순위 구간을 뽑는다."""
+    if df is None or df.empty or len(df) < 20:
+        return None
+    try:
+        tail = df.tail(lookback)
+        low_s, high_s = _price_range_series(tail)
+        vols = tail["volume"].astype(float).fillna(0.0)
+        if float(vols.sum()) <= 0:
+            return None
+        lo, hi = float(low_s.min()), float(high_s.max())
+        if not (lo > 0 and hi > lo):
+            return None
+        step = (hi - lo) / buckets
+        if step <= 0:
+            return None
+
+        acc = [0.0] * buckets
+        for l, h, v in zip(low_s.tolist(), high_s.tolist(), vols.tolist()):
+            if not v or v <= 0:
+                continue
+            b1 = min(buckets - 1, max(0, int((float(l) - lo) / step)))
+            b2 = min(buckets - 1, max(0, int((float(h) - lo) / step)))
+            if b2 < b1:
+                b1, b2 = b2, b1
+            share = v / (b2 - b1 + 1)
+            for b in range(b1, b2 + 1):
+                acc[b] += share
+
+        total = sum(acc)
+        if total <= 0:
+            return None
+        centers = [lo + step * (i + 0.5) for i in range(buckets)]
+        poc_i = max(range(buckets), key=lambda i: acc[i])
+        second_i = None
+        for i in sorted(range(buckets), key=lambda i: -acc[i]):
+            if abs(i - poc_i) > 1:  # POC와 붙어있는 구간은 같은 매물대로 본다
+                if acc[i] / total >= 0.03:
+                    second_i = i
+                break
+        return {
+            "구간수": buckets,
+            "조회일수": int(len(tail)),
+            "가격하한": round(lo, 2),
+            "가격상한": round(hi, 2),
+            "구간폭": round(step, 2),
+            "POC": round(centers[poc_i], 2),
+            "POC_비중_pct": round(acc[poc_i] / total * 100, 2),
+            "2차매물대": (round(centers[second_i], 2) if second_i is not None else None),
+            "2차_비중_pct": (round(acc[second_i] / total * 100, 2) if second_i is not None else None),
+        }
+    except Exception as e:
+        print("⚠️ 매물대 계산 오류:", e)
+        return None
+
+
+def calc_volume_spikes(df, multiple=2.0, lookback=60, base_window=20, top=3):
+    """직전 base_window일 평균 거래량 대비 multiple배 이상 터진 봉을 최근 발생 순으로 최대 top개.
+    핵심 기준가는 고·저 중심가(없으면 종가)."""
+    if df is None or df.empty or len(df) < base_window + 5:
+        return []
+    try:
+        d = df.copy()
+        d["vol"] = d["volume"].astype(float).fillna(0.0)
+        d["base"] = d["vol"].rolling(base_window).mean().shift(1)
+        tail = d.tail(lookback)
+        found = []
+        for i in range(len(tail) - 1, -1, -1):
+            row = tail.iloc[i]
+            base = row["base"]
+            if pd.isna(base) or base <= 0 or row["vol"] <= 0:
+                continue
+            ratio = float(row["vol"]) / float(base)
+            if ratio < multiple:
+                continue
+            low = row["low"] if "low" in tail.columns and not pd.isna(row["low"]) else None
+            high = row["high"] if "high" in tail.columns and not pd.isna(row["high"]) else None
+            px = (float(low) + float(high)) / 2 if (low and high) else float(row["close"])
+            found.append({"날짜": row["date"].strftime("%m/%d"),
+                          "일자": row["date"].strftime("%Y-%m-%d"),
+                          "가격": round(px, 2),
+                          "배수": round(ratio, 2)})
+            if len(found) >= top:
+                break
+        # 서로 1% 안에 붙은 봉은 같은 자리로 보고 가장 최근 것만 남긴다.
+        out = []
+        for s in found:
+            if any(abs(s["가격"] - o["가격"]) / o["가격"] * 100 < 1.0 for o in out):
+                continue
+            out.append(s)
+        return out
+    except Exception as e:
+        print("⚠️ 거래량 급증봉 계산 오류:", e)
+        return []
+
+
+# ==========================
+# 📄 증권사 리포트(국내) · 애널리스트 컨센서스(미국)
+# ==========================
+_NAVER_RESEARCH_LIST = "https://m.stock.naver.com/front-api/research/stockList"
+_NAVER_RESEARCH_PAGE = "https://m.stock.naver.com/investment/research/company/{rid}"
+_RESEARCH_HDRS = {"User-Agent": UA, "Referer": "https://m.stock.naver.com/"}
+_RESEARCH_CACHE = {}
+_RESEARCH_CACHE_TTL = 1800
+_RESEARCH_EMPTY_TTL = 180
+
+_OPINION_KO = {
+    "strong buy": "Strong Buy", "strongbuy": "Strong Buy", "적극매수": "Strong Buy", "적극 매수": "Strong Buy",
+    "trading buy": "Trading Buy", "buy": "Buy", "매수": "Buy",
+    "marketperform": "Hold", "market perform": "Hold", "hold": "Hold", "중립": "Hold", "보유": "Hold",
+    "underperform": "Underperform", "reduce": "Reduce", "sell": "Sell", "매도": "Sell", "축소": "Reduce",
+}
+
+
+def _strip_html(text):
+    s = str(text or "")
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    s = re.sub(r"</(p|div|tr|li)>", "\n", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = html_mod.unescape(s)
+    s = re.sub(r"[ \t\u00a0]+", " ", s)
+    s = re.sub(r"\n{2,}", "\n", s)
+    return s.strip()
+
+
+def _summary_sentences(text, max_sentences=2, max_chars=230):
+    """본문 앞 1~2문장만 남긴 요약."""
+    flat = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not flat:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", flat)
+    out = ""
+    for p in parts[:max_sentences]:
+        out = (out + " " + p).strip()
+    if not out:
+        out = flat[:max_chars]
+    if len(out) > max_chars:
+        out = out[:max_chars].rstrip() + "…"
+    return out
+
+
+def _pick_summary(body, preview=""):
+    """본문이 있으면 앞부분 1~2문장, 없으면 목록 미리보기 문장을 쓴다.
+    본문 첫 줄이 제목·부제 같은 짧은 머리말이면 건너뛰고 다음 문장부터 요약한다."""
+    text = str(body or "").strip()
+    if text:
+        paras = [p.strip() for p in text.split("\n") if p.strip()]
+        if len(paras) > 1 and len(paras[0]) < 70 and not paras[0].endswith((".", "다", "요", "…")):
+            paras = paras[1:]
+        s = _summary_sentences(paras[0] if paras else text)
+        if s:
+            return s
+    return _summary_sentences(preview)
+
+
+def _parse_opinion(text):
+    t = str(text or "").lower()
+    if not t:
+        return None
+    # 긴 영문 표기부터 확인해 'buy'가 'strong buy'를 잘못 집지 않게 한다.
+    for key in ("strong buy", "strongbuy", "trading buy", "marketperform", "market perform",
+                "underperform", "buy", "hold", "중립", "보유", "매수", "매도", "sell", "reduce", "축소", "적극매수"):
+        if key.isascii():
+            if re.search(r"(?<![a-z])" + re.escape(key) + r"(?![a-z])", t):
+                return _OPINION_KO.get(key)
+        elif key in t:
+            return _OPINION_KO.get(key)
+    return None
+
+
+def _parse_target_price(text):
+    """본문 문장에서 목표주가를 원 단위로 추출. 예: '목표주가 37만원', '목표주가를 40만원으로', '목표주가 370,000원'."""
+    t = str(text or "")
+    for pat in (r"목표\s*주가[^0-9]{0,14}([0-9][0-9,\.]*)\s*(만원|원)?",
+                r"\bTP\b[^0-9]{0,6}([0-9][0-9,\.]*)\s*(만원|원)?"):
+        m = re.search(pat, t)
+        if not m:
+            continue
+        try:
+            num = float(m.group(1).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        unit = m.group(2) or "원"
+        val = num * 10000 if unit == "만원" else num
+        if 100 <= val <= 5_000_000:
+            return round(val)
+    return None
+
+
+def _kr_report_detail(research_id):
+    """네이버 증권 리포트 상세 페이지의 __NEXT_DATA__에서 의견·목표주가·본문·PDF 링크를 뽑는다."""
+    try:
+        res = requests.get(_NAVER_RESEARCH_PAGE.format(rid=research_id),
+                           headers=_RESEARCH_HDRS, timeout=4)
+        if res.status_code != 200:
+            return {}
+        m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                      res.text, re.S)
+        if not m:
+            return {}
+        data = json.loads(m.group(1))
+        queries = (((data.get("props") or {}).get("pageProps") or {})
+                   .get("dehydratedState") or {}).get("queries") or []
+        for q in queries:
+            result = ((q.get("state") or {}).get("data") or {}).get("result")
+            if isinstance(result, dict) and result.get("researchContent"):
+                return result["researchContent"]
+    except Exception as e:
+        print(f"⚠️ 리포트 상세 파싱 오류({research_id}):", type(e).__name__)
+    return {}
+
+
+def get_kr_research_reports(code, limit=5, price=None):
+    """국내 종목 최신 증권사 리포트 목록 + 의견·목표주가·요약·PDF 링크. 실패해도 빈 결과만 돌려준다."""
+    key = f"{code}:{limit}"
+    hit = _RESEARCH_CACHE.get(key)
+    if hit and (datetime.now() - hit["at"]).total_seconds() < hit["ttl"]:
+        return hit["data"]
+
+    items = []
+    try:
+        res = requests.get(_NAVER_RESEARCH_LIST,
+                           params={"itemCode": code, "page": 1, "pageSize": limit},
+                           headers=_RESEARCH_HDRS, timeout=4)
+        if res.status_code == 200:
+            raw = (res.json() or {}).get("result") or []
+            items = [r for r in raw if str(r.get("itemCode")) == str(code)][:limit]
+    except Exception as e:
+        print("⚠️ 증권사 리포트 목록 오류:", type(e).__name__)
+        items = []
+
+    if not items:
+        data = {"지원": True, "상태": "empty", "통화": "KRW", "리포트": [], "컨센서스": None,
+                "비고": "최근 증권사 리포트를 찾지 못했습니다(네이버 증권 리서치 기준)."}
+        _RESEARCH_CACHE[key] = {"at": datetime.now(), "ttl": _RESEARCH_EMPTY_TTL, "data": data}
+        return data
+
+    details = {}
+    try:
+        with ThreadPoolExecutor(max_workers=min(5, len(items))) as pool:
+            futures = {pool.submit(_kr_report_detail, it.get("researchId")): it.get("researchId")
+                       for it in items}
+            for fut, rid in futures.items():
+                try:
+                    details[rid] = fut.result(timeout=8)
+                except Exception:
+                    details[rid] = {}
+    except Exception as e:
+        print("⚠️ 리포트 상세 병렬 조회 오류:", type(e).__name__)
+
+    reports, targets, opinions = [], [], {}
+    for it in items:
+        rid = it.get("researchId")
+        det = details.get(rid) or {}
+        body = _strip_html(det.get("content") or "")
+        summary = _pick_summary(body, it.get("previewContent") or "")
+
+        goal = det.get("goalPrice")
+        try:
+            goal = float(str(goal).replace(",", "")) if goal not in (None, "") else None
+        except (TypeError, ValueError):
+            goal = None
+        if not goal:
+            goal = _parse_target_price(it.get("previewContent") or body)
+        opinion = _parse_opinion(det.get("opinion")) or _parse_opinion(it.get("title") or "") \
+            or _parse_opinion(it.get("previewContent") or "")
+
+        write_date = str(it.get("writeDate") or "")
+        rep = {
+            "증권사": str(det.get("brokerName") or it.get("brokerName") or "").strip(),
+            "작성일": write_date,
+            "제목": str(it.get("title") or "").strip(),
+            "투자의견": opinion,
+            "목표주가": goal,
+            "목표주가_표시": (_fmt_price(goal, "KRW") if goal else None),
+            "현재가_대비_pct": (round((goal / price - 1) * 100, 2) if goal and price else None),
+            "요약": summary,
+            "원문_PDF": det.get("attachUrl") or None,
+            "상세": f"https://m.stock.naver.com/investment/research/company/{rid}",
+        }
+        reports.append(rep)
+        if goal:
+            targets.append(float(goal))
+        if opinion:
+            opinions[opinion] = opinions.get(opinion, 0) + 1
+
+    consensus = None
+    if targets:
+        consensus = {
+            "기준": f"최근 리포트 {len(targets)}건 표본",
+            "표본수": len(targets),
+            "평균_목표주가": round(sum(targets) / len(targets), 0),
+            "최저_목표주가": round(min(targets), 0),
+            "최고_목표주가": round(max(targets), 0),
+            "현재가": round(price, 2) if price else None,
+            "평균_괴리율_pct": (round((sum(targets) / len(targets) / price - 1) * 100, 2) if price else None),
+            "투자의견_분포": opinions,
+        }
+
+    data = {"지원": True, "상태": "ok", "통화": "KRW", "출처": "네이버 증권 리서치",
+            "리포트": reports, "컨센서스": consensus}
+    _RESEARCH_CACHE[key] = {"at": datetime.now(), "ttl": _RESEARCH_CACHE_TTL, "data": data}
+    return data
+
+
+_YAHOO_HTTP = {"session": None, "crumb": None, "at": None}
+
+
+def _yahoo_crumb(force=False):
+    """야후 quoteSummary는 쿠키+crumb가 필요하다. 10분 캐시."""
+    now = datetime.now()
+    if (not force and _YAHOO_HTTP.get("crumb")
+            and _YAHOO_HTTP.get("at") and (now - _YAHOO_HTTP["at"]).total_seconds() < 600):
+        return _YAHOO_HTTP["crumb"]
+    try:
+        if _YAHOO_HTTP.get("session") is None:
+            _YAHOO_HTTP["session"] = requests.Session()
+        sess = _YAHOO_HTTP["session"]
+        try:
+            sess.get("https://fc.yahoo.com", headers={"User-Agent": UA}, timeout=4)
+        except Exception:
+            pass
+        res = sess.get("https://query1.finance.yahoo.com/v1/test/getcrumb",
+                       headers={"User-Agent": UA}, timeout=4)
+        crumb = (res.text or "").strip()
+        if res.status_code == 200 and crumb and "<" not in crumb:
+            _YAHOO_HTTP.update({"crumb": crumb, "at": now})
+            return crumb
+    except Exception as e:
+        print("⚠️ 야후 crumb 오류:", type(e).__name__)
+    return None
+
+
+def get_us_analyst_consensus(ticker, price=None):
+    """미국 종목 애널리스트 컨센서스: 목표주가 최저/평균/중앙/최고, 투자의견 분포, 애널리스트 수."""
+    key = f"us:{ticker}"
+    hit = _RESEARCH_CACHE.get(key)
+    if hit and (datetime.now() - hit["at"]).total_seconds() < hit["ttl"]:
+        return hit["data"]
+
+    def _empty(note):
+        data = {"지원": False, "상태": "unavailable", "통화": "USD", "리포트": [],
+                "컨센서스": None, "비고": note}
+        _RESEARCH_CACHE[key] = {"at": datetime.now(), "ttl": _RESEARCH_EMPTY_TTL, "data": data}
+        return data
+
+    def _fetch(crumb):
+        sess = _YAHOO_HTTP.get("session") or requests
+        return sess.get(f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}",
+                        params={"modules": "financialData,recommendationTrend", "crumb": crumb},
+                        headers={"User-Agent": UA}, timeout=5)
+
+    try:
+        crumb = _yahoo_crumb()
+        if not crumb:
+            return _empty("야후 인증(crumb)을 받지 못해 컨센서스를 조회하지 못했습니다.")
+        res = _fetch(crumb)
+        if res.status_code == 401:
+            crumb = _yahoo_crumb(force=True)
+            res = _fetch(crumb) if crumb else res
+        if res.status_code != 200:
+            return _empty(f"야후 컨센서스 응답 오류(HTTP {res.status_code}).")
+        result = ((res.json() or {}).get("quoteSummary") or {}).get("result") or []
+        if not result:
+            return _empty("야후에 이 종목의 애널리스트 데이터가 없습니다.")
+        block = result[0] or {}
+        fin = block.get("financialData") or {}
+
+        def raw(key_name):
+            v = fin.get(key_name)
+            if isinstance(v, dict):
+                return v.get("raw")
+            return v if isinstance(v, (int, float)) else None
+
+        def num(key_name, nd=2):
+            v = raw(key_name)
+            return None if v is None else round(float(v), nd)
+
+        trend = ((block.get("recommendationTrend") or {}).get("trend") or [])
+        now_trend = trend[0] if trend else {}
+        dist = {"강력매수": now_trend.get("strongBuy", 0) or 0,
+                "매수": now_trend.get("buy", 0) or 0,
+                "보유": now_trend.get("hold", 0) or 0,
+                "매도": now_trend.get("sell", 0) or 0,
+                "강력매도": now_trend.get("strongSell", 0) or 0}
+        total_dist = sum(dist.values())
+
+        cur = num("currentPrice") or (round(price, 2) if price else None)
+        mean = num("targetMeanPrice")
+        consensus = {
+            "기준": "야후 파이낸스 애널리스트 컨센서스",
+            "애널리스트수": int(num("numberOfAnalystOpinions", 0) or 0) or (total_dist or None),
+            "평균_목표주가": mean,
+            "중앙값_목표주가": num("targetMedianPrice"),
+            "최저_목표주가": num("targetLowPrice"),
+            "최고_목표주가": num("targetHighPrice"),
+            "현재가": cur,
+            "평균_괴리율_pct": (round((mean / cur - 1) * 100, 2) if mean and cur else None),
+            "투자의견": (block.get("financialData") or {}).get("recommendationKey"),
+            "투자의견_점수": num("recommendationMean"),
+            "투자의견_분포": dist if total_dist else None,
+            "분포_합계": total_dist or None,
+        }
+        data = {"지원": True, "상태": "ok", "통화": "USD", "출처": "야후 파이낸스",
+                "리포트": [], "컨센서스": consensus}
+        _RESEARCH_CACHE[key] = {"at": datetime.now(), "ttl": _RESEARCH_CACHE_TTL, "data": data}
+        return data
+    except Exception as e:
+        print("⚠️ 미국 컨센서스 조회 오류:", type(e).__name__)
+        return _empty("애널리스트 컨센서스를 불러오지 못했습니다.")
 
 
 def rsi_zone(rsi):
@@ -858,6 +1317,9 @@ def build_report(stock_name):
     recent = df.tail(20)
     low20 = float(recent["close"].min())
     high20 = float(recent["close"].max())
+    longer = df.tail(60)
+    low60 = float(longer["close"].min())
+    high60 = float(longer["close"].max())
 
     # ---------- 축 1: 매집비/추정평단 ----------
     acc_points = {}
@@ -1015,13 +1477,35 @@ def build_report(stock_name):
         grade, grade_label = grade_of(total_score)
 
     # ---------- 지지선/저항선 ----------
-    level_pool = [("5일선", ma5), ("20일선", ma20), ("60일선", ma60),
-                  ("20일 VWAP", vwap20), ("최근 20일 종가 최저", low20), ("최근 20일 종가 최고", high20)]
-    levels = [(n, float(v)) for n, v in level_pool if v is not None and v > 0]
+    vp = calc_volume_profile(df)
+    spikes = calc_volume_spikes(df)
+
+    level_pool = []
+    if vp:
+        level_pool.append(("최대 매물대(POC)", vp["POC"]))
+        if vp.get("2차매물대"):
+            level_pool.append(("주요 매물대(2차)", vp["2차매물대"]))
+    level_pool += [(f"거래량 급증봉({sp['날짜']})", sp["가격"]) for sp in spikes]
+    level_pool += [("5일선", ma5), ("20일선", ma20), ("60일선", ma60),
+                   ("20일 VWAP", vwap20), ("최근 20일 종가 최저", low20), ("최근 20일 종가 최고", high20),
+                   ("최근 60일 종가 최저", low60), ("최근 60일 종가 최고", high60)]
+
+    # 값이 거의 같은 선(0.25% 이내)은 한 줄로 합친다. 앞에 둔 이름(매물대·급증봉)을 남긴다.
+    levels = []
+    for n, v in level_pool:
+        if v is None or pd.isna(v):
+            continue
+        v = float(v)
+        if v <= 0:
+            continue
+        if any(abs(v - e[1]) / price * 100 < 0.25 for e in levels):
+            continue
+        levels.append((n, v))
+
     supports = sorted([{"구분": n, "가격": round(v, 2), "현재가_대비_pct": round((v - price) / price * 100, 2)}
-                       for n, v in levels if v < price * 0.999], key=lambda x: -x["가격"])[:3]
+                       for n, v in levels if v < price * 0.999], key=lambda x: -x["가격"])[:5]
     resistances = sorted([{"구분": n, "가격": round(v, 2), "현재가_대비_pct": round((v - price) / price * 100, 2)}
-                          for n, v in levels if v > price * 1.001], key=lambda x: x["가격"])[:3]
+                          for n, v in levels if v > price * 1.001], key=lambda x: x["가격"])[:5]
 
     # ---------- 축별 결과 정리 ----------
     def axis_block(score, verdict, comment, numbers=None, weight=None):
@@ -1047,6 +1531,12 @@ def build_report(stock_name):
                              "배열": ma_order, "지지_이평선": above, "이탈_이평선": below,
                              "계산": {n: (w if ok else -w) for n, w, ok in ma_points}}, WEIGHTS["이평선"]),
     }
+
+    # ---------- 증권사 리포트 / 애널리스트 컨센서스 ----------
+    if kr:
+        research = get_kr_research_reports(code, limit=5, price=price)
+    else:
+        research = get_us_analyst_consensus(code, price=price)
 
     # ---------- 한 줄 요약 · 사람용 리포트 ----------
     cur = _fmt_price(price, currency)
@@ -1080,12 +1570,39 @@ def build_report(stock_name):
         lines.append("지지선: " + " / ".join(
             f"{s['구분']} {_fmt_price(s['가격'], currency)}({s['현재가_대비_pct']:+.1f}%)" for s in supports))
     else:
-        lines.append("지지선: 현재가 아래에 뚜렷한 이평선·VWAP 지지가 없습니다.")
+        lines.append("지지선: 현재가 아래에 지지 후보(이평선·VWAP·매물대·급증봉)가 없습니다.")
     if resistances:
         lines.append("저항선: " + " / ".join(
             f"{r['구분']} {_fmt_price(r['가격'], currency)}({r['현재가_대비_pct']:+.1f}%)" for r in resistances))
     else:
-        lines.append("저항선: 현재가 위에 뚜렷한 이평선·VWAP 저항이 없습니다.")
+        lines.append("저항선: 현재가 위에 저항 후보(이평선·VWAP·매물대·급증봉)가 없습니다.")
+    if vp:
+        lines.append(f"매물대(최근 {vp['조회일수']}거래일·{vp['구간수']}구간): POC "
+                     f"{_fmt_price(vp['POC'], currency)} ({vp['POC_비중_pct']}%)"
+                     + (f" / 2차 {_fmt_price(vp['2차매물대'], currency)}" if vp.get("2차매물대") else ""))
+    if spikes:
+        lines.append("거래량 급증봉: " + " / ".join(
+            f"{s['날짜']} {_fmt_price(s['가격'], currency)}({s['배수']}배)" for s in spikes))
+    r_reports = (research or {}).get("리포트") or []
+    r_cons = (research or {}).get("컨센서스")
+    if r_reports:
+        lines.append(f"증권사 리포트(최근 {len(r_reports)}건, 네이버 증권 리서치)")
+        for rr in r_reports[:3]:
+            tp = rr.get("목표주가_표시") or "-"
+            lines.append(f"   · {rr.get('작성일', '')} {rr.get('증권사', '')} [{rr.get('투자의견') or '의견-'}] "
+                         f"목표가 {tp} — {(rr.get('제목') or '')[:44]}")
+        if r_cons and r_cons.get("평균_목표주가"):
+            lines.append(f"   · 목표주가 평균 {_fmt_price(r_cons['평균_목표주가'], currency)}"
+                         f" (최저 {_fmt_price(r_cons.get('최저_목표주가'), currency)} ~ "
+                         f"최고 {_fmt_price(r_cons.get('최고_목표주가'), currency)})")
+    elif r_cons:
+        lines.append(f"애널리스트 컨센서스({r_cons.get('기준', '')}): 평균 목표주가 "
+                     f"{_fmt_price(r_cons.get('평균_목표주가'), currency)}"
+                     + (f" (최저 {_fmt_price(r_cons.get('최저_목표주가'), currency)} ~ "
+                        f"최고 {_fmt_price(r_cons.get('최고_목표주가'), currency)})" if r_cons.get("최저_목표주가") else "")
+                     + (f" · 애널리스트 {r_cons.get('애널리스트수')}명" if r_cons.get("애널리스트수") else ""))
+    elif research and research.get("비고"):
+        lines.append(f"증권사 리포트·컨센서스: {research['비고']}")
     lines.append("")
     lines.append(f"종합해석: {total_score}/100 → {grade}({grade_label}). "
                  f"가중치 매집 25 · 수급 25 · 모멘텀 20 · RSI 15 · 이평선 15"
@@ -1127,6 +1644,14 @@ def build_report(stock_name):
             "MA60_지지여부": None if ma60 is None else ("지지" if price > ma60 else "이탈"),
             "최근20일_종가최저": round(low20, 2),
             "최근20일_종가최고": round(high20, 2),
+            "최근60일_종가최저": round(low60, 2),
+            "최근60일_종가최고": round(high60, 2),
+            "매물대_POC": (vp["POC"] if vp else None),
+            "매물대_POC_비중_pct": (vp["POC_비중_pct"] if vp else None),
+            "매물대_2차": (vp.get("2차매물대") if vp else None),
+            "매물대_구간수": (vp["구간수"] if vp else None),
+            "매물대_조회일수": (vp["조회일수"] if vp else None),
+            "거래량_급증봉": spikes,
         },
         "수급": {
             "지원": bool(kr and supply_available),
@@ -1138,6 +1663,7 @@ def build_report(stock_name):
         },
         "축별해석": axes,
         "지지선저항선": {"지지선": supports, "저항선": resistances},
+        "리서치": research,
         "formula_notes": FORMULA_NOTES,
         "summary_report": summary_report,
         "주의": "조회·분석 전용입니다. 주문·매매 API는 포함되어 있지 않습니다.",
@@ -1156,6 +1682,7 @@ def api_index_endpoint():
         "endpoints": {
             "POST /report": "종합 매수·매도 리포트: 매집비·추정평단·RSI·모멘텀·수급·이평선 + 종합등급",
             "GET /report/{stock_name}": "같은 리포트를 GET으로 조회 (예: /report/삼성전자)",
+            "GET /research/{stock_name}": "증권사 리포트(국내) / 애널리스트 컨센서스(미국)만 조회",
             "POST /quantumx": "종목 분석: 매집점수·상승확률·매매신호",
             "GET /recommend": "추천 종목 TOP3",
             "GET /search?q=": "종목명·티커 검색(국내+해외, 최대 10건) → code·name·typeName",
@@ -1230,6 +1757,19 @@ def report_endpoint():
 def report_get_endpoint(stock_name):
     body, status = build_report(str(stock_name).strip())
     return jsonify(body), status
+
+
+@app.route("/research/<path:stock_name>", methods=["GET"])
+def research_get_endpoint(stock_name):
+    """증권사 리포트(국내) / 애널리스트 컨센서스(미국)만 따로 조회."""
+    code = get_stock_code_global(str(stock_name).strip())
+    if not code:
+        return jsonify({"error": "❌ 종목 코드 인식 실패", "종목명": stock_name}), 400
+    _, df = get_stock_data(code)
+    price = float(df["close"].iloc[-1]) if (df is not None and not df.empty) else None
+    data = (get_kr_research_reports(code, price=price) if is_korea_code(code)
+            else get_us_analyst_consensus(code, price=price))
+    return jsonify({"종목명": stock_name, "종목코드": code, **data})
 
 
 @app.route("/recommend", methods=["GET"])

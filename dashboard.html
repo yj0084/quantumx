@@ -1,6 +1,14 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
+<!-- Google tag (gtag.js) — QuantumX Pro 방문자 추적 (GA4) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-MX7PB746DY"></script>
+<script>
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-MX7PB746DY');
+</script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0d13">
@@ -108,6 +116,16 @@ td:last-child,th:last-child{text-align:right}
 .lv{display:grid;gap:10px}
 @media(min-width:700px){.lv{grid-template-columns:1fr 1fr}}
 .lv h4{margin:0 0 4px;font-size:12px;color:var(--dim)}
+.rp{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:9px}
+.rp-h{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.rp-h b{color:#e6eefb;font-size:12.5px}
+.rp-h span{font-size:11px;color:var(--dim2)}
+.rp-t{font-size:13px;font-weight:700;margin-top:5px;color:#dbe6f5;line-height:1.4;word-break:keep-all}
+.rp-m{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:7px;font-size:11.5px;color:#b6c5da}
+.rp-s{margin-top:7px;font-size:11.5px;color:#9fb0c8;line-height:1.55;word-break:keep-all}
+.rp-l{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
+.rp-l a{font-size:11px;color:#8fb6ff;text-decoration:none;border:1px solid var(--line2);border-radius:7px;padding:4px 9px}
+.rp-l a:hover{border-color:var(--acc)}
 .fold{margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:var(--rad);overflow:hidden}
 .fold summary{cursor:pointer;padding:12px 14px;font-size:12.5px;font-weight:700;color:#c3d2e6;list-style:none}
 .fold summary::-webkit-details-marker{display:none}
@@ -430,9 +448,58 @@ function render(d,ms){
     return t+'</tbody></table>';
   }
   var lv='<div class="sec-h">지지선 / 저항선</div><div class="lv">'+
-    '<div class="card"><h4>지지선 (아래)</h4>'+lvTable(sup,"현재가 아래에 뚜렷한 이평선·VWAP 지지가 없습니다.")+'</div>'+
-    '<div class="card"><h4>저항선 (위)</h4>'+lvTable(res,"현재가 위에 뚜렷한 이평선·VWAP 저항이 없습니다.")+'</div>'+
+    '<div class="card"><h4>지지선 (아래)</h4>'+lvTable(sup,"현재가 아래에 지지 후보(이평선·VWAP·매물대·급증봉)가 없습니다.")+'</div>'+
+    '<div class="card"><h4>저항선 (위)</h4>'+lvTable(res,"현재가 위에 저항 후보(이평선·VWAP·매물대·급증봉)가 없습니다.")+'</div>'+
     '</div>';
+
+  /* 증권사 리포트 / 컨센서스 */
+  var RS=d["리서치"]||{}, reps=RS["리포트"]||[], cons=RS["컨센서스"]||null;
+  var rcur=RS["통화"]||cur;
+  function opCls(op){
+    if(!op) return "";
+    if(/strong buy|buy|매수/i.test(op)) return "ok";
+    if(/sell|매도|reduce|축소|underperform/i.test(op)) return "no";
+    return "";
+  }
+  var rsec='';
+  if(reps.length||cons||(RS["비고"]&&String(RS["상태"]||"")!=="ok")){
+    rsec='<div class="sec-h">증권사 리포트 / 컨센서스</div>';
+    if(cons){
+      var crow=[];
+      if(cons["평균_목표주가"]!=null) crow.push(["평균 목표주가",price(cons["평균_목표주가"],rcur)+
+        (cons["평균_괴리율_pct"]!=null?' <span class="'+cls(cons["평균_괴리율_pct"])+'">'+pct(cons["평균_괴리율_pct"])+'</span>':'')]);
+      if(cons["최저_목표주가"]!=null) crow.push(["목표주가 범위",price(cons["최저_목표주가"],rcur)+" ~ "+price(cons["최고_목표주가"],rcur)]);
+      if(cons["중앙값_목표주가"]!=null) crow.push(["중앙값",price(cons["중앙값_목표주가"],rcur)]);
+      if(cons["애널리스트수"]) crow.push(["애널리스트 수",num(cons["애널리스트수"],0)+"명"]);
+      if(cons["투자의견"]) crow.push(["투자의견",'<span class="pill '+opCls(cons["투자의견"])+'">'+esc(cons["투자의견"])+'</span>'
+        +(cons["투자의견_점수"]!=null?' <span class="mut">(평균 '+num(cons["투자의견_점수"],2)+' / 5)</span>':'')]);
+      var dist=cons["투자의견_분포"];
+      if(dist&&Object.keys(dist).length){
+        var dp=Object.keys(dist).map(function(k){ return '<span class="pill '+opCls(k)+'">'+esc(k)+' '+num(dist[k],0)+'</span>'; }).join(" ");
+        crow.push(["의견 분포",dp]);
+      }
+      rsec+='<div class="card">'+(crow.length?kv(crow):'<div class="note">컨센서스 수치가 없습니다.</div>')+
+        (cons["기준"]?'<div class="note" style="margin-top:7px">'+esc(cons["기준"])+'</div>':'')+'</div>';
+    }
+    if(reps.length){
+      rsec+='<div>'+reps.map(function(r){
+        var tp=r["목표주가"];
+        var tpH=(tp==null?'<span class="mut">-</span>':price(tp,"KRW"))+
+          (r["현재가_대비_pct"]!=null?' <span class="'+cls(r["현재가_대비_pct"])+'">'+pct(r["현재가_대비_pct"])+'</span>':'');
+        var links='';
+        if(r["상세"]) links+='<a href="'+esc(r["상세"])+'" target="_blank" rel="noopener">리포트 보기</a>';
+        if(r["원문_PDF"]) links+='<a href="'+esc(r["원문_PDF"])+'" target="_blank" rel="noopener">PDF 원문</a>';
+        return '<div class="rp"><div class="rp-h"><b>'+esc(r["증권사"]||"-")+'</b><span>'+esc(r["작성일"]||"")+'</span></div>'+
+          '<div class="rp-t">'+esc(r["제목"]||"")+'</div>'+
+          '<div class="rp-m"><span class="pill '+opCls(r["투자의견"])+'">'+esc(r["투자의견"]||"의견 -")+'</span>'+
+          '<span>목표주가 '+tpH+'</span></div>'+
+          (r["요약"]?'<div class="rp-s">'+esc(r["요약"])+'</div>':'')+
+          (links?'<div class="rp-l">'+links+'</div>':'')+'</div>';
+      }).join('')+'</div>';
+    }else if(!cons&&RS["비고"]){
+      rsec+='<div class="card"><div class="note">'+esc(RS["비고"])+'</div></div>';
+    }
+  }
 
   /* formula notes */
   var F=d["formula_notes"]||{}, fk=Object.keys(F);
@@ -444,7 +511,7 @@ function render(d,ms){
   var rep=d["summary_report"]||"";
   var repFold=rep?'<details class="fold"><summary>전체 리포트 텍스트 보기</summary><div class="body"><pre id="rep">'+esc(rep)+'</pre></div></details>':'';
 
-  h+='<div class="stack">'+cards+lv+fold+repFold+
+  h+='<div class="stack">'+cards+lv+rsec+fold+repFold+
      '<div class="card" style="font-size:11.5px;color:#7f8da1">※ 과거 시세·수급 기반 기술적 계산이며 투자자문이 아닙니다. 조회 전용(주문·매매 기능 없음).</div>'+
      '</div>';
 
