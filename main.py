@@ -689,10 +689,16 @@ WEIGHTS = {"매집": 25, "수급": 25, "모멘텀": 20, "RSI": 15, "이평선": 
 FORMULA_NOTES = {
     "매집비": ("최근 20거래일 중 종가가 전일 종가보다 오른 날의 거래량 합 ÷ 같은 20거래일 전체 거래량 합 × 100. "
             "50% 초과면 상승일에 거래량이 더 실린다는 뜻이라 매집 우위, 50% 미만이면 하락일 거래량이 우위(분산)로 해석한다."),
-    "추정평단": ("VWAP20 = Σ(종가×거래량) ÷ Σ(거래량) (최근 20거래일). 거래량 가중평균단가로 "
-             "'최근 20거래일 시장 참여자의 평균 매입단가' 추정치다. 비교용으로 60거래일 VWAP도 함께 낸다."),
-    "괴리율": ("(현재가 - 추정평단) ÷ 추정평단 × 100. 음수면 현재가가 추정 평단보다 낮아 평균 매수자가 손실 구간, "
-            "양수면 평균 매수자가 이익 구간이다."),
+    "핵심매물대": ("최근 최대 120거래일 거래량을 가격대별로 쌓아 가장 두꺼운 구간을 최대 매물대(POC)로 보고, "
+               "그 구간과 붙지 않은(±1구간 밖) 곳에서 그다음으로 두꺼운 2~3개 구간을 '매물 집중 구간'으로 보여준다. "
+               "비중(%) = 그 구간에 쌓인 거래량 ÷ 전체 거래량 × 100. 현재가 대비 거리(%)는 "
+               "(구간 중심가 - 현재가) ÷ 현재가 × 100이라 양수면 현재가 위(저항 후보), 음수면 아래(지지 후보)다. "
+               "거래량이 많이 바뀐 자리는 그 가격에서 사고팔린 사람이 많다는 뜻이라 지지·저항 후보가 되지만 절대적인 벽은 아니다."),
+    "20일 VWAP (보조)": ("보조 지표. VWAP20 = Σ(종가×거래량) ÷ Σ(거래량) (최근 20거래일). 거래량 가중평균단가로 "
+                   "'최근 20거래일 시장 참여자의 평균 매입단가' 추정치다. 화면에서는 1번 카드 아래 작은 글씨로만 쓰고, "
+                   "축 점수의 과열(추격) 감점 항에만 사용한다. 비교용으로 60거래일 VWAP도 함께 낸다."),
+    "VWAP괴리율": ("(현재가 - 20일 VWAP) ÷ 20일 VWAP × 100. 양수면 현재가가 평균 매입단가보다 높아 추격 부담, "
+                "음수면 낮아 평균 매수자 손실 구간으로 본다. 매물대 거리와 달리 점수 계산에만 쓰인다."),
     "RSI14": ("Wilder 방식. 14거래일 평균상승폭(AU)과 평균하락폭(AD)을 지수평활로 갱신하고 "
               "RS=AU/AD, RSI=100-100/(1+RS). 30 이하 과매도, 70 이상 과매수."),
     "ROC": ("(현재가 ÷ N거래일 전 종가 - 1) × 100. 5일=단기 모멘텀, 20일=중기 모멘텀."),
@@ -701,7 +707,8 @@ FORMULA_NOTES = {
             "비중(%) = 누적 순매수 수량 ÷ 같은 기간 누적 거래량 × 100. 미국 종목은 이 API가 없어 미제공."),
     "이평선": ("MA5/MA20/MA60 = 최근 N거래일 종가 단순평균. 현재가가 이평선 위면 지지, 아래면 이탈로 본다. "
              "MA5>MA20>MA60이면 정배열(상승 추세), 반대면 역배열."),
-    "축별점수_매집": "매집점수 = 50 + (매집비-50)×0.8 - (괴리율×1.2), 괴리율은 ±15%로 제한 후 0~100 클리핑.",
+    "축별점수_매집": ("매집점수 = 50 + (매집비-50)×0.8 - (20일 VWAP 괴리율×1.2), 괴리율은 ±15%로 제한 후 0~100 클리핑. "
+                 "괴리율 항은 평균 매입단가 대비 과열(추격) 정도를 빼는 항이고, 매물대(POC)는 점수가 아니라 위치 판정에 쓴다."),
     "축별점수_RSI": ("구간표: ≤30 → 72점(과매도·반등 후보), 30~40 → 62점, 40~50 → 56점, 50~60 → 58점, "
                    "60~70 → 48점(과열 진입), ≥70 → 30점(과매수·추격 금지)."),
     "축별점수_모멘텀": "모멘텀점수 = 50 + ROC5×2.0 + ROC20×1.0 + (거래량모멘텀-1)×15, 0~100 클리핑.",
@@ -810,9 +817,9 @@ def _price_range_series(df):
     return pd.concat([low, close], axis=1).min(axis=1), pd.concat([high, close], axis=1).max(axis=1)
 
 
-def calc_volume_profile(df, buckets=18, lookback=120):
+def calc_volume_profile(df, buckets=18, lookback=120, top_n=3, min_share=2.0):
     """가격대별 매물대. 조회 이력의 가격 범위를 buckets개 구간으로 나눠 각 봉의 거래량을
-    그 봉이 걸친 구간들에 균등 배분해 누적하고, 최대 구간(POC)과 2순위 구간을 뽑는다."""
+    그 봉이 걸친 구간들에 균등 배분해 누적하고, 최대 구간(POC)과 매물 집중 구간 TOP N을 뽑는다."""
     if df is None or df.empty or len(df) < 20:
         return None
     try:
@@ -845,12 +852,27 @@ def calc_volume_profile(df, buckets=18, lookback=120):
             return None
         centers = [lo + step * (i + 0.5) for i in range(buckets)]
         poc_i = max(range(buckets), key=lambda i: acc[i])
-        second_i = None
+
+        # 매물 집중 구간: 누적 거래량이 큰 구간부터. POC와 붙어있는 구간(±1)은 같은 매물대로
+        # 보고 건너뛰고, 2순위부터는 비중이 min_share% 미만이면 넣지 않는다.
+        clusters = []
         for i in sorted(range(buckets), key=lambda i: -acc[i]):
-            if abs(i - poc_i) > 1:  # POC와 붙어있는 구간은 같은 매물대로 본다
-                if acc[i] / total >= 0.03:
-                    second_i = i
+            if acc[i] <= 0 or len(clusters) >= top_n:
                 break
+            if any(abs(i - c["구간"]) <= 1 for c in clusters):
+                continue
+            share = acc[i] / total * 100
+            if clusters and share < min_share:
+                continue
+            clusters.append({
+                "순위": len(clusters) + 1,
+                "구간": i,
+                "하한": round(lo + step * i, 2),
+                "상한": round(lo + step * (i + 1), 2),
+                "중심가": round(centers[i], 2),
+                "비중_pct": round(share, 2),
+            })
+        second_i = clusters[1]["구간"] if len(clusters) > 1 else None
         return {
             "구간수": buckets,
             "조회일수": int(len(tail)),
@@ -861,6 +883,9 @@ def calc_volume_profile(df, buckets=18, lookback=120):
             "POC_비중_pct": round(acc[poc_i] / total * 100, 2),
             "2차매물대": (round(centers[second_i], 2) if second_i is not None else None),
             "2차_비중_pct": (round(acc[second_i] / total * 100, 2) if second_i is not None else None),
+            # 매물 집중 구간 TOP N (1순위가 POC). 중심가·가격 구간·거래 비중을 함께 준다.
+            "매물집중구간": clusters,
+            "상위구간_합산_비중_pct": round(sum(c["비중_pct"] for c in clusters), 2),
         }
     except Exception as e:
         print("⚠️ 매물대 계산 오류:", e)
@@ -1389,33 +1414,74 @@ def build_report(stock_name):
     low60 = float(longer["close"].min())
     high60 = float(longer["close"].max())
 
-    # ---------- 축 1: 매집비/추정평단 ----------
+    # ---------- 매물대(Volume Profile) · 핵심 매물대 ----------
+    vp = calc_volume_profile(df)
+    spikes = calc_volume_spikes(df)
+    poc = (vp or {}).get("POC")
+    poc_share = (vp or {}).get("POC_비중_pct")
+    # 매물대 거리: (POC - 현재가) ÷ 현재가 × 100. +면 매물대가 현재가 위(저항 후보), -면 아래(지지 후보).
+    poc_dist = round((poc - price) / price * 100, 2) if poc else None
+    if poc_dist is None:
+        poc_zone = None
+    elif poc_dist > 0.5:
+        poc_zone = "위"
+    elif poc_dist < -0.5:
+        poc_zone = "아래"
+    else:
+        poc_zone = "구간 안"
+    poc_zone_label = {"위": "현재가 위 · 저항 후보",
+                      "아래": "현재가 아래 · 지지 후보",
+                      "구간 안": "현재가 구간 안"}.get(poc_zone, "매물대 계산 불가")
+    poc_zone_short = {"위": "위 · 저항", "아래": "아래 · 지지", "구간 안": "구간 안"}.get(poc_zone, "-")
+
+    # 매물 집중 구간에 현재가 대비 거리와 '현재가가 구간 안' 여부를 붙인다.
+    bands = []
+    for c in ((vp or {}).get("매물집중구간") or []):
+        b = dict(c)
+        b["현재가_대비_pct"] = round((c["중심가"] - price) / price * 100, 2)
+        b["현재가_구간내"] = bool(c["하한"] <= price <= c["상한"])
+        bands.append(b)
+    nearest_band = min(bands, key=lambda x: abs(x["현재가_대비_pct"])) if bands else None
+
+    # ---------- 축 1: 매집비 · 핵심 매물대 ----------
     acc_points = {}
     acc_score = None
     if acc_ratio is not None and gap_pct is not None:
         gap_clipped = _clip(gap_pct, -15, 15)
         acc_score = _clip(50 + (acc_ratio - 50) * 0.8 - gap_clipped * 1.2, 0, 100)
         acc_points = {"기준 50": 50, f"(매집비-50)×0.8 = ({acc_ratio}-50)×0.8": round((acc_ratio - 50) * 0.8, 2),
-                      f"-(괴리율)×1.2 = -({gap_clipped})×1.2": round(-gap_clipped * 1.2, 2)}
+                      f"-(20일 VWAP 괴리율)×1.2 = -({gap_clipped})×1.2": round(-gap_clipped * 1.2, 2)}
+
+    if poc is None:
+        poc_sentence = "매물대를 계산할 만큼 가격 범위가 넓지 않아 매물 집중 구간은 표시하지 않습니다."
+    else:
+        poc_sentence = (f"거래량이 가장 많이 쌓인 구간(최대 매물대 POC)은 {_fmt_price(poc, currency)}"
+                        + (f"(거래량 비중 {poc_share}%)" if poc_share is not None else "")
+                        + f"이고 현재가는 그보다 {abs(poc_dist):.2f}% "
+                        + ("아래입니다. 현재가 위에 쌓인 이 구간이 저항 후보입니다. " if poc_zone == "위" else
+                           "위입니다. 현재가 아래의 이 구간이 지지 후보입니다. " if poc_zone == "아래" else
+                           "차이 나지 않는 구간 안에 있습니다. 이 가격대가 기준선 역할을 합니다. "))
+        if bands:
+            poc_sentence += (f"매물 집중 구간 {len(bands)}곳에 전체 거래량의 "
+                             f"{(vp or {}).get('상위구간_합산_비중_pct')}%가 모여 있습니다.")
+
     if acc_ratio is None:
         acc_verdict = "계산 불가(거래량 없음)"
-        acc_comment = "거래량 데이터가 없어 매집비를 계산하지 못했습니다."
+        acc_comment = "거래량 데이터가 없어 매집비를 계산하지 못했습니다. " + poc_sentence
     elif acc_ratio >= 60:
         acc_verdict = "강한 매집"
         acc_comment = (f"최근 20거래일 거래량의 {acc_ratio}%가 상승일에 실렸습니다. 매수세가 거래량을 주도하는 구간입니다. "
-                       f"현재가는 추정평단 {_fmt_price(est_avg, currency)} 대비 {gap_pct:+.2f}%입니다.")
+                       + poc_sentence)
     elif acc_ratio >= 52:
         acc_verdict = "매집 우위"
-        acc_comment = (f"상승일 거래량 비중 {acc_ratio}%로 매집 우위입니다. 현재가는 추정평단 "
-                       f"{_fmt_price(est_avg, currency)} 대비 {gap_pct:+.2f}%.")
+        acc_comment = f"상승일 거래량 비중 {acc_ratio}%로 매집 우위입니다. " + poc_sentence
     elif acc_ratio >= 45:
         acc_verdict = "중립"
-        acc_comment = (f"상승일·하락일 거래량이 비슷합니다(매집비 {acc_ratio}%). 현재가는 추정평단 "
-                       f"{_fmt_price(est_avg, currency)} 대비 {gap_pct:+.2f}%.")
+        acc_comment = f"상승일·하락일 거래량이 비슷합니다(매집비 {acc_ratio}%). " + poc_sentence
     else:
         acc_verdict = "분산 우위"
         acc_comment = (f"하락일 거래량이 더 많습니다(매집비 {acc_ratio}%). 매수 주체가 약한 구간으로 봅니다. "
-                       f"현재가는 추정평단 {_fmt_price(est_avg, currency)} 대비 {gap_pct:+.2f}%.")
+                       + poc_sentence)
 
     # ---------- 축 2: RSI ----------
     rsi_s = rsi_score(rsi14)
@@ -1545,9 +1611,6 @@ def build_report(stock_name):
         grade, grade_label = grade_of(total_score)
 
     # ---------- 지지선/저항선 ----------
-    vp = calc_volume_profile(df)
-    spikes = calc_volume_spikes(df)
-
     level_pool = []
     if vp:
         level_pool.append(("최대 매물대(POC)", vp["POC"]))
@@ -1582,11 +1645,27 @@ def build_report(stock_name):
                 "가중치_pct": weight,
                 "수치": numbers or {}}
 
+    acc_numbers = {
+        "매집비_pct": acc_ratio,
+        "최대매물대_POC": _r(poc, 2),
+        "최대매물대_POC_비중_pct": poc_share,
+        "최대매물대_현재가대비_pct": poc_dist,
+        "최대매물대_위치": poc_zone_short,
+        "최대매물대_위치_라벨": poc_zone_label,
+        "매물집중구간": bands,
+        "상위구간_합산_비중_pct": (vp or {}).get("상위구간_합산_비중_pct"),
+        "매물대_조회일수": (vp or {}).get("조회일수"),
+        "매물대_구간폭": (vp or {}).get("구간폭"),
+        # 보조 지표: 축 점수 산식에 쓰이는 20일 VWAP. 화면에서는 작게만 표시한다.
+        "추정평단": _r(est_avg, 2),
+        "추정평단_괴리율_pct": gap_pct,
+        "VWAP20": _r(vwap20, 2),
+        "VWAP60": _r(vwap60, 2),
+        "통화": currency,
+    }
     axes = {
-        "1_매집비_추정평단": axis_block(acc_score, acc_verdict, acc_comment,
-                                 {"매집비_pct": acc_ratio, "추정평단": _r(est_avg, 2),
-                                  "추정평단_괴리율_pct": gap_pct, "VWAP20": _r(vwap20, 2),
-                                  "VWAP60": _r(vwap60, 2), "통화": currency}, WEIGHTS["매집"]),
+        "1_매집비_매물대": axis_block(acc_score, acc_verdict, acc_comment,
+                                 acc_numbers, WEIGHTS["매집"]),
         "2_RSI": axis_block(rsi_s, rsi_verdict, rsi_comment,
                             {"RSI14": rsi14, "기간": 14}, WEIGHTS["RSI"]),
         "3_모멘텀": axis_block(mom_score, mom_verdict, mom_comment,
@@ -1609,20 +1688,32 @@ def build_report(stock_name):
     # ---------- 한 줄 요약 · 사람용 리포트 ----------
     cur = _fmt_price(price, currency)
     one_line = (f"{grade}({grade_label}) — {ma_order}, RSI {rsi14 if rsi14 is not None else '-'}, "
-                f"추정평단 {_fmt_price(est_avg, currency)} 대비 {gap_pct:+.2f}%"
-                if gap_pct is not None
-                else f"{grade}({grade_label}) — {ma_order}, RSI {rsi14 if rsi14 is not None else '-'}")
+                f"매집비 {acc_ratio if acc_ratio is not None else '-'}%, 최대 매물대 "
+                + (f"{_fmt_price(poc, currency)} (현재가 대비 {poc_dist:+.1f}% · {poc_zone_label})"
+                   if poc is not None and poc_dist is not None else "계산 불가"))
 
     lines = []
     lines.append(f"[{stock_name}({code}) 종합 매수·매도 리포트]")
     lines.append(f"기준일 {base_date} · 현재가 {cur} · 데이터 {len(df)}거래일")
     lines.append(f"종합등급 {grade}({grade_label}) · 종합점수 {total_score}/100")
     lines.append("")
-    lines.append(f"1) 매집비·추정평단 — {axes['1_매집비_추정평단']['판정']} (축점수 "
-                 f"{axes['1_매집비_추정평단']['점수']})")
-    lines.append(f"   · 매집비(20일) {acc_ratio if acc_ratio is not None else '-'}% / 추정평단(VWAP20) "
-                 f"{_fmt_price(est_avg, currency)} / 괴리율 {gap_pct:+.2f}%" if gap_pct is not None else
-                 f"   · 매집비(20일) {acc_ratio if acc_ratio is not None else '-'}%")
+    lines.append(f"1) 매집비·핵심 매물대 — {axes['1_매집비_매물대']['판정']} (축점수 "
+                 f"{axes['1_매집비_매물대']['점수']})")
+    line1 = f"   · 매집비(20일) {acc_ratio if acc_ratio is not None else '-'}%"
+    if poc is not None:
+        line1 += (f" / 최대 매물대(POC) {_fmt_price(poc, currency)} (거래량 비중 "
+                  f"{poc_share if poc_share is not None else '-'}%, 현재가 대비 {poc_dist:+.1f}% · {poc_zone_label})")
+    lines.append(line1)
+    if bands:
+        lines.append("   · 매물 집중 구간 TOP" + str(len(bands)) + ": " + " / ".join(
+            f"{i + 1}) {_fmt_price(b['중심가'], currency)} [{_fmt_price(b['하한'], currency)}~"
+            f"{_fmt_price(b['상한'], currency)}] 비중 {b['비중_pct']}% · 현재가 대비 {b['현재가_대비_pct']:+.1f}%"
+            f"{' (현재가 구간 안)' if b['현재가_구간내'] else ''}" for i, b in enumerate(bands)))
+    if nearest_band is not None:
+        lines.append(f"   · 현재가에서 가장 가까운 매물대: {_fmt_price(nearest_band['중심가'], currency)}"
+                     f" ({nearest_band['현재가_대비_pct']:+.1f}%)")
+    lines.append(f"   · 추세 기준선(보조): 20일 VWAP {_fmt_price(est_avg, currency)}"
+                 + (f" 현재가 대비 {gap_pct:+.1f}%" if gap_pct is not None else ""))
     lines.append(f"   · {acc_comment}")
     lines.append(f"2) RSI(14) — {rsi14 if rsi14 is not None else '-'} · {rsi_verdict} (축점수 "
                  f"{axes['2_RSI']['점수']})")
@@ -1645,9 +1736,9 @@ def build_report(stock_name):
     else:
         lines.append("저항선: 현재가 위에 저항 후보(이평선·VWAP·매물대·급증봉)가 없습니다.")
     if vp:
-        lines.append(f"매물대(최근 {vp['조회일수']}거래일·{vp['구간수']}구간): POC "
-                     f"{_fmt_price(vp['POC'], currency)} ({vp['POC_비중_pct']}%)"
-                     + (f" / 2차 {_fmt_price(vp['2차매물대'], currency)}" if vp.get("2차매물대") else ""))
+        lines.append(f"매물대 계산 범위: 최근 {vp['조회일수']}거래일 · {vp['구간수']}구간 · "
+                     f"가격 {_fmt_price(vp['가격하한'], currency)}~{_fmt_price(vp['가격상한'], currency)}"
+                     f"(구간폭 {_fmt_price(vp['구간폭'], currency)})")
     if spikes:
         lines.append("거래량 급증봉: " + " / ".join(
             f"{s['날짜']} {_fmt_price(s['가격'], currency)}({s['배수']}배)" for s in spikes))
@@ -1716,7 +1807,14 @@ def build_report(stock_name):
             "최근60일_종가최고": round(high60, 2),
             "매물대_POC": (vp["POC"] if vp else None),
             "매물대_POC_비중_pct": (vp["POC_비중_pct"] if vp else None),
+            "매물대_POC_현재가대비_pct": poc_dist,
+            "매물대_POC_위치": poc_zone_label,
             "매물대_2차": (vp.get("2차매물대") if vp else None),
+            "매물집중구간": bands,
+            "매물대_상위구간_합산_비중_pct": ((vp or {}).get("상위구간_합산_비중_pct")),
+            "매물대_가격하한": (vp["가격하한"] if vp else None),
+            "매물대_가격상한": (vp["가격상한"] if vp else None),
+            "매물대_구간폭": (vp["구간폭"] if vp else None),
             "매물대_구간수": (vp["구간수"] if vp else None),
             "매물대_조회일수": (vp["조회일수"] if vp else None),
             "거래량_급증봉": spikes,
@@ -1748,7 +1846,7 @@ def api_index_endpoint():
         "name": "QuantumX PRO API",
         "mode": "조회 전용 (주문/매매 기능 없음)",
         "endpoints": {
-            "POST /report": "종합 매수·매도 리포트: 매집비·추정평단·RSI·모멘텀·수급·이평선 + 종합등급",
+            "POST /report": "종합 매수·매도 리포트: 매집비·핵심 매물대(POC·매물 집중 구간)·RSI·모멘텀·수급·이평선 + 종합등급",
             "GET /report/{stock_name}": "같은 리포트를 GET으로 조회 (예: /report/삼성전자)",
             "GET /research/{stock_name}": "증권사 리포트(국내) / 애널리스트 컨센서스(미국)만 조회",
             "POST /quantumx": "종목 분석: 매집점수·상승확률·매매신호",

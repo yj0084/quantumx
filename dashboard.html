@@ -101,6 +101,22 @@ background:conic-gradient(var(--gc,#94a3b8) calc(var(--p,0)*1%),#1f2a3d 0)}
 .bar{height:5px;border-radius:99px;background:#1f2a3d;margin-top:10px;overflow:hidden}
 .bar i{display:block;height:100%;border-radius:99px;background:var(--gc,#5b8dff)}
 .note{font-size:11.5px;color:var(--dim);margin-top:9px}
+.pocline{font-size:11.5px;color:#c2d1e5;margin-top:7px;font-variant-numeric:tabular-nums}
+.poclab{font-size:10px;color:var(--dim2);margin-top:1px;letter-spacing:.2px}
+.bands-h{font-size:10.5px;color:var(--dim2);margin-top:11px;letter-spacing:.2px}
+.bands-h span{color:#5d6b80}
+.bands{display:grid;gap:7px;margin-top:6px}
+.band .bt{display:flex;align-items:baseline;gap:6px;font-size:11.5px}
+.band .bt b{font-size:12.5px;font-variant-numeric:tabular-nums}
+.band .rk{flex:0 0 auto;width:14px;height:14px;border-radius:5px;background:var(--panel2);border:1px solid var(--line2);
+color:#a9b8cc;font-size:9.5px;font-weight:700;font-style:normal;display:grid;place-items:center;align-self:center}
+.band .sh{color:var(--dim);font-size:10.5px}
+.band .dg{margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums}
+.band .bb{height:5px;border-radius:99px;background:#1f2a3d;overflow:hidden;margin-top:3px}
+.band .bb i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#7c5cd6,#a78bfa)}
+.band .br{font-size:9.5px;color:#5d6b80;margin-top:2px;font-variant-numeric:tabular-nums}
+.band.in .bt b{color:#fff}
+.band.in .bb i{background:linear-gradient(90deg,#16a34a,#4ade80)}
 .mini{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .pill{font-size:10.5px;border-radius:6px;padding:2px 7px;border:1px solid var(--line2);color:#b9c8dc;background:#151d29}
 .pill.ok{color:#86e0a8;border-color:#1e4632;background:#0f2119}
@@ -390,15 +406,49 @@ function render(d,ms){
      '</div>';
 
   /* 5 axes */
-  var a1=ax("1_매집비_추정평단"),a2=ax("2_RSI"),a3=ax("3_모멘텀"),a4=ax("4_수급"),a5=ax("5_이평선");
+  var a1=ax("1_매집비_매물대"),a2=ax("2_RSI"),a3=ax("3_모멘텀"),a4=ax("4_수급"),a5=ax("5_이평선");
   var cards='<div class="sec-h">5대 지표</div><div class="grid">';
 
-  cards+=axisCard(1,"매집비 · 추정평단",a1.w,a1.sc,a1.vd,
-    a1.n["매집비_pct"]==null?"-":num(a1.n["매집비_pct"])+"%",
-    kv([["추정평단 (VWAP20)",price(a1.n["추정평단"],a1.n["통화"]||cur)],
-        ["현재가 괴리율",'<span class="'+cls(a1.n["추정평단_괴리율_pct"])+'">'+pct(a1.n["추정평단_괴리율_pct"])+'</span>'],
-        ["VWAP60",price(a1.n["VWAP60"],a1.n["통화"]||cur)]]),
-    "#8b5cf6");
+  /* 1번: 매집비 · 핵심 매물대 (POC + 매물 집중 구간 TOP3) */
+  var n1=a1.n||{}, c1=n1["통화"]||cur;
+  var poc=n1["최대매물대_POC"], pocOfs=n1["최대매물대_현재가대비_pct"],
+      pocShare=n1["최대매물대_POC_비중_pct"], bands=n1["매물집중구간"]||[],
+      accPct=n1["매집비_pct"], vpDays=n1["매물대_조회일수"], vwap=n1["VWAP20"];
+  var sumShare=n1["상위구간_합산_비중_pct"];
+  var sideLbl = n1["최대매물대_위치"]||"";
+  var a1body=(poc!=null?'<div class="poclab">최대 매물대(POC) 가격</div>':'');
+  if(poc!=null){
+    a1body+='<div class="pocline">현재가 대비 <span class="'+cls(pocOfs)+'">'+pct(pocOfs,1)+'</span>'+
+      (pocShare!=null?'<span class="mut"> · 거래량 비중 '+num(pocShare,1)+'%</span>':'')+'</div>';
+  }
+  a1body+='<div class="bands-h">매물 집중 구간'+(vpDays?' <span>최근 '+num(vpDays,0)+'거래일</span>':'')+'</div>';
+  if(bands.length){
+    var maxShare=Math.max.apply(null,bands.map(function(b){return Number(b["비중_pct"])||0;}));
+    if(!(maxShare>0)) maxShare=1;
+    a1body+='<div class="bands">';
+    bands.forEach(function(b,i){
+      var w=Math.max(6,Math.min(100,((Number(b["비중_pct"])||0)/maxShare)*100));
+      var d=b["현재가_대비_pct"], inside=!!b["현재가_구간내"];
+      a1body+='<div class="band'+(inside?' in':'')+'">'+
+        '<div class="bt"><i class="rk">'+(i+1)+'</i><b>'+price(b["중심가"],c1)+'</b>'+
+        '<span class="sh">'+num(b["비중_pct"],1)+'%</span>'+
+        '<span class="dg '+(inside?'pos':cls(d))+'" title="현재가 대비 거리">'+pct(d,1)+'</span></div>'+
+        '<div class="bb"><i style="width:'+w+'%"></i></div>'+
+        '<div class="br">'+price(b["하한"],c1)+' ~ '+price(b["상한"],c1)+'</div>'+
+      '</div>';
+    });
+    a1body+='</div>';
+  }else{
+    a1body+='<div class="note">매물대를 계산할 가격 범위가 부족합니다.</div>';
+  }
+  var miniHtml='';
+  if(accPct!=null) miniHtml+='<span class="pill">매집비 '+num(accPct,1)+'%'+(a1.vd?' · '+esc(a1.vd):'')+'</span>';
+  if(sumShare!=null) miniHtml+='<span class="pill">'+(bands.length||0)+'구간 합산 '+num(sumShare,1)+'%</span>';
+  if(miniHtml) a1body+='<div class="mini">'+miniHtml+'</div>';
+  if(vwap!=null) a1body+='<div class="note" style="color:#7f8da1;font-size:10.5px">보조 · 20일 VWAP '+price(vwap,c1)+
+    (n1["추정평단_괴리율_pct"]!=null?' <span class="'+cls(n1["추정평단_괴리율_pct"])+'">'+pct(n1["추정평단_괴리율_pct"],1)+'</span>':'')+'</div>';
+  cards+=axisCard(1,"매집비 · 핵심 매물대",a1.w,a1.sc,sideLbl||a1.vd,
+    poc==null?"-":price(poc,c1), a1body, "#8b5cf6");
 
   var rsi=a2.n["RSI14"], rsiP=rsi==null?0:Math.max(0,Math.min(100,Number(rsi)));
   cards+=axisCard(2,"RSI(14)",a2.w,a2.sc,a2.vd,rsi==null?"-":num(rsi,1),
