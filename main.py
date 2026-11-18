@@ -1223,7 +1223,7 @@ def get_us_analyst_consensus(ticker, price=None):
             alt["비고"] = f"야후 조회 실패({note})로 대체 소스를 사용했습니다."
             _RESEARCH_CACHE[key] = {"at": datetime.now(), "ttl": _RESEARCH_CACHE_TTL, "data": alt}
             return alt
-        return _empty(note)
+        return _empty(f"애널리스트 목표주가를 찾지 못했습니다({note}). ETF·스팩 등은 컨센서스를 제공하지 않습니다.")
 
     def _fetch(crumb):
         sess = _YAHOO_HTTP.get("session") or requests
